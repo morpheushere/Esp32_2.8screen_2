@@ -139,7 +139,14 @@ void real_poll_tick() {
     // avoid both the fragmentation getString() caused and the hang
     // stream-based parsing caused (right after tapping Accept, on this
     // exact client, previously). See src/http_json.h.
-    DynamicJsonDocument doc(2048);
+    // StaticJsonDocument, not DynamicJsonDocument -- every other client
+    // (weather/spotify/calendar) already uses a stack-allocated
+    // StaticJsonDocument specifically to avoid a heap malloc on every poll;
+    // this one didn't, and reproduced the same "NoMemory" heap-fragmentation
+    // failure the others were written to avoid (confirmed live: consistent
+    // parse failures on this exact device that weather/spotify/calendar
+    // didn't hit at the same time).
+    StaticJsonDocument<2048> doc;
     DeserializationError err = http_read_json(http, doc);
     if (err == DeserializationError::Ok) {
       JsonArrayConst items = doc.as<JsonArrayConst>();
