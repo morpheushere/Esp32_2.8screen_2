@@ -1,67 +1,53 @@
-# ESP32 2.8" Ambient Weather + Spotify Display
+# ESP32 2.8" Ambient Weather + Spotify + Claude Approval Display
 
-A port of [ESP32_experiment1](https://github.com/morpheushere/ESP32_experiment1) (originally built for a Waveshare ESP32-C6-LCD-1.47, 172x320 portrait) to a **Cheap Yellow Display (ESP32-2432S028R)**, a 2.8" 240x320 ILI9341 board run landscape (320x240) here, with its resistive touchscreen added for manual view switching.
+A 4-tab LVGL dashboard for a **Cheap Yellow Display (ESP32-2432S028R)**, a 2.8" 240x320 ILI9341 board with resistive XPT2046 touch. This merges two earlier projects into one that actually runs on this exact board:
 
-Alternates every minute between:
+- [ESP32_experiment1](https://github.com/morpheushere/ESP32_experiment1) -- the original ambient weather/Spotify display concept (built for a different board, a Waveshare ESP32-C6-LCD-1.47)
+- [esp32_experiment2_2.8inch](https://github.com/morpheushere/esp32_experiment2_2.8inch) -- a from-scratch LVGL/LovyanGFX rebuild of that concept specifically for this CYD board, which also added Calendar and Claude-approval tabs. **This repo's firmware is that project**, carried over as-is (its rendering stack, tab structure, and hard-won heap/network fixes all apply directly here).
 
-- **Backyard weather** -- live temperature/humidity/pressure/wind pulled from a home weather station, with a temperature-driven animated background (color gradient, drifting glow, wind-scaled particle field), sparkline trend rows, and the onboard RGB LED pulsing in the same temperature color at a heartbeat-like rate that quickens with heat.
-- **Spotify now-playing** -- a phone-lock-screen style view: current album art scaled to cover the whole panel, with track/artist text overlaid on a scrim (long artist names scroll via a marquee), plus a progress bar.
+## Tabs
 
-Tap the screen anywhere to jump between views immediately instead of waiting for the 60s auto-rotation.
+1. **Weather** -- live temperature/humidity/pressure/wind, animated temperature-gradient background (drifting glow, wind-scaled particles), sparkline trend rows, onboard RGB LED pulsing in the temperature color.
+2. **Spotify** -- now-playing view: album art filling the panel, track/artist text on a scrim (marquee for long names), progress bar, playback controls.
+3. **Calendar** -- upcoming events from the backend's calendar cache.
+4. **Claude** -- shows a pending Claude Code permission request (project, tool, command summary) with **Accept**/**Deny** buttons, bridged from a `PermissionRequest` hook running on the Mac driving Claude Code. Shows "No pending decisions" when nothing's waiting.
 
-Both views pull from a self-hosted Flask backend (the [strava-heatmap-pwa](https://github.com/morpheushere/strava-heatmap-pwa) project) that already aggregates a home InfluxDB weather station and the Spotify API -- this firmware is just a small, low-power satellite display for data that backend already collects.
+Swipe or tap the top tab bar to switch. Each tab's background polling only runs while it's the active tab.
+
+All four pull from the same self-hosted Flask backend (the [strava-heatmap-pwa](https://github.com/morpheushere/strava-heatmap-pwa) project's `api/` service on a home NAS) -- this firmware only reads/writes that backend's already-cached JSON endpoints.
 
 ## Hardware
 
-- Board: Cheap Yellow Display (ESP32-2432S028R) -- ESP32-D0WD-V3, 4MB flash, 240x320 ILI9341 SPI LCD (run landscape, 320x240), resistive XPT2046 touchscreen, discrete (non-addressable) RGB status LED, CH340 USB-serial bridge.
-- Display wiring (`include/display_config.h`): SCK=14, MOSI=13, MISO=12, DC=2, CS=15, no hardware RST (tied to EN), BL=21 (PWM backlight, active HIGH).
-- Touch wiring, on its own SPI bus (`include/display_config.h`): SCK=25, MOSI=32, MISO=39, CS=33, IRQ=36.
-- RGB LED: R=4, G=16, B=17 -- active LOW (common anode).
+- Board: Cheap Yellow Display (ESP32-2432S028R) -- ESP32-D0WD-V3, 4MB flash, 240x320 ILI9341 SPI panel (run landscape via `setRotation(1)`), resistive XPT2046 touch on its own SPI bus, discrete RGB status LED, CH340 USB-serial bridge.
+- Pin config lives in `include/LGFX_CYD.hpp` (LovyanGFX device class) -- display SCK=14/MOSI=13/MISO=12/DC=2/CS=15/BL=21, touch SCK=25/MOSI=32/MISO=39/CS=33/IRQ=36, RGB LED R=4/G=16/B=17 (active low, see `src/rgb_led.cpp`).
 - No extra components required -- runs entirely off the board's USB power.
-
-Pinout differs from the original C6 board (different panel driver, no shared bus with touch, no addressable LED) -- see the "Differences from the original project" section below.
 
 ## Architecture
 
-- `src/main.cpp` -- boot sequence, WiFi connect/retry, poll timers, view-rotation state machine, touch-driven manual view switch, the ~6.7fps animation loop
-- `src/animation.cpp` -- temperature/wind-driven background gradient, drifting glow, particle field, and onboard RGB LED pulse (`include/animation.h`)
-- `src/weather_client.cpp` / `src/spotify_client.cpp` -- HTTP+JSON clients for the backend's `/api/weather/current` and `/api/spotify/now-playing` + `/api/spotify/art.raw` endpoints (unchanged from the original project -- pure HTTP/JSON, no display coupling)
-- `src/scene.cpp` -- all drawing: the weather placard (numeral + condition pill + unit label in a left column, stat rows with sparklines in a right column) and the Spotify screen (bilinear-scaled album art background, scrim, marquee text, progress bar)
-- `include/colors.h` -- the temperature-to-color gradient (unchanged from the original project, ported from the backend PWA's own ambient scene)
-- `include/display_config.h` -- board pin/panel constants
-
-Album art arrives from the backend pre-converted to raw 80x80 RGB565 pixels (no JPEG decoder needed on-device).
-
-## Differences from the original project
-
-| | Original (Waveshare C6) | This port (CYD 2.8") |
-|---|---|---|
-| Panel | 172x320 portrait ST7789 | 320x240 landscape ILI9341 |
-| Layout | Single vertical stack (pill/numeral/unit label/3 stat rows) | Left column (numeral) + right column (stat rows) |
-| Touch | None | XPT2046 resistive -- any tap toggles the current view |
-| Status LED | Single WS2811 addressable RGB (FastLED) | 3 discrete PWM-driven LEDs, active low |
-| USB | Native USB-Serial-JTOG | CH340 USB-UART bridge |
-| PlatformIO platform | `pioarduino` fork (C6 needs it for Arduino support) | Official `espressif32` (classic ESP32 is fully supported) |
+- `src/main.cpp` -- boots the display, builds the tabview, and ticks each tab's client every loop() iteration
+- `src/display_init.cpp` -- LovyanGFX + LVGL wiring (draw buffers, flush/touch callbacks)
+- `src/ui_tabview.cpp` -- the 4-tab `lv_tabview`, pausing/resuming each tab's background polling on tab switch
+- `src/tab_weather.cpp` + `src/weather_client.cpp` (+ `temp_gradient.cpp`, `rgb_led.cpp`) -- weather tab and its animated scene
+- `src/tab_spotify.cpp` + `src/spotify_client.cpp` -- Spotify tab
+- `src/tab_calendar.cpp` + `src/calendar_client.cpp` -- Calendar tab
+- `src/tab_claude.cpp` + `src/claude_approval_client.cpp` -- Claude approval tab
+- `src/http_json.cpp`, `src/network_health.cpp` -- shared bounded-read JSON helper and a consecutive-failure watchdog restart, both added after live heap-fragmentation issues broke sockets on this device
+- `src/bauhaus_colors.h` -- shared palette across every tab (ported from the PWA/original project)
 
 ## Setup
 
-1. Copy `include/secrets.h.example` to `include/secrets.h` and fill in:
-   - `WIFI_SSID` / `WIFI_PASSWORD` -- your home network
-   - `WEATHER_API_HOST` / `WEATHER_API_PORT` -- your backend's address (the strava-heatmap-pwa nginx container)
-   - The `WEATHER_API_PATH`, `SPOTIFY_API_PATH`, `SPOTIFY_ART_PATH` values shouldn't need to change unless the backend's routes do
-
-   `secrets.h` is gitignored -- never commit it.
-
+1. Copy `include/secrets.h.example` to `include/secrets.h` and fill in your WiFi SSID/password and `API_BASE_URL` (the NAS backend's host:port). `secrets.h` is gitignored.
 2. This project uses [PlatformIO](https://platformio.org/). Build and flash:
-
    ```
    pio run --target upload
    ```
-
-   Confirm `upload_port`/`monitor_port` in `platformio.ini` match the board's current USB-serial enumeration (`ls /dev/cu.*` on macOS) before flashing.
-
+   Confirm `upload_port`/`monitor_port` in `platformio.ini` match this board's current USB-serial enumeration (`ls /dev/cu.*` on macOS).
 3. Watch boot/status logs over serial at 115200 baud (`pio device monitor`).
+
+## Enabling the Claude approval tab
+
+The Claude tab is read/write against the backend's mailbox queue (`api/claude_approval.py` + the `/api/claude/pending*` routes in `strava-heatmap-pwa`), but the piece that actually creates a pending entry is a Claude Code hook running on whichever machine drives Claude Code -- **not part of this firmware repo**. That hook script is `~/.claude/hooks/remote_approval.py` (a `PermissionRequest` hook: posts a pending entry, polls for up to ~280s, fails safe to deny on timeout or if the backend's unreachable). It needs to be registered in that machine's `~/.claude/settings.json` under a `hooks` entry for the `PermissionRequest` event -- it isn't currently wired up there, so the feature is inactive until that's added back.
 
 ## Requirements on the backend side
 
-Same as the original project -- a reachable `strava-heatmap-pwa` instance serving `/api/weather/current`, `/api/spotify/now-playing`, and `/api/spotify/art.raw` (80x80 raw RGB565).
+A reachable `strava-heatmap-pwa` instance serving the weather/Spotify/calendar cache endpoints plus `/api/claude/pending` (list/create), `/api/claude/pending/<id>` (get), and `/api/claude/pending/<id>/decide` (POST `{"decision": "allow"|"deny"}`).
